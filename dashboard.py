@@ -169,9 +169,6 @@ def get_gemini_rag_analysis(data_summary, shap_data):
     """
     [업그레이드] 컬럼 설명을 포함하여 더 똑똑한 분석 생성
     """
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
-        return "⚠️ Gemini API 키 필요"
-        
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-flash-latest')
     
