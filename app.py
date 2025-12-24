@@ -21,7 +21,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # 사이드바
-st.sidebar.title("🛠️ 모델 설정")
+st.sidebar.title("🔎 기업 검색")
 ticker = st.sidebar.text_input("종목 코드")
 if st.sidebar.button("AI 진단 시작"):
     st.session_state['run'] = True
@@ -54,37 +54,78 @@ if st.session_state.get('run'):
     draw_light(c3, "거시경제 환경", ind['macro'], "🌍")
 
     
-    # 3. 다차원 리스크 분석 (상위 8개 피처 수준 비교)
+    # 3. 다차원 건전성 분석 (상위 8개 피처 수준 비교)
     st.divider()
-    st.subheader("📊 벤치마크 리스크 프로파일 (정상/산업 평균 대비 피처 수준)")
+    st.subheader("📊 핵심 지표 건전성 분석 (높을수록 안전/우량)")
     
     df_all = pd.DataFrame(data['shap_data'])
-    plot_df = df_all.head(8) # 다중지능 그래프는 상위 8개 유지 (가독성)
+    plot_df = df_all.head(8) # 상위 8개 유지
     
     categories = plot_df['name'].tolist()
     company_scores = plot_df['score'].tolist()
     normal_scores = plot_df['normal_avg'].tolist()
-    industry_scores = plot_df['industry_avg'].tolist() # 산업군 평균 리스트 추가
+    industry_scores = plot_df['industry_avg'].tolist() 
     
+    # 툴팁에 들어갈 설명
     hover_labels = [f"원본값: {row['val']}<br>설명: {db.FEATURE_MAP.get(row['name'], '')}" for _, row in plot_df.iterrows()]
 
     col_bar, col_radar = st.columns(2)
 
+    # [왼쪽] 바 차트: 건전성 수준 비교
     with col_bar:
         fig_bar = go.Figure()
-        fig_bar.add_trace(go.Bar(x=categories, y=company_scores, name='대상 기업', marker_color='red', customdata=hover_labels, hovertemplate="<b>%{x}</b><br>위험 점수: %{y}점<br>%{customdata}<extra></extra>"))
-        fig_bar.add_trace(go.Bar(x=categories, y=normal_scores, name='정상 평균', marker_color='green', opacity=0.5))
-        fig_bar.add_trace(go.Bar(x=categories, y=industry_scores, name='산업 평균', marker_color='orange', opacity=0.5)) # 바 차트에 산업 평균 추가
-        fig_bar.update_layout(title="주요 위험 요인 수준 비교", barmode='group', height=500)
+        
+        # 1. 내 기업 (파란색: 건전함/안전함 강조)
+        fig_bar.add_trace(go.Bar(
+            x=categories, 
+            y=company_scores, 
+            name='대상 기업', 
+            marker_color='#2962ff',  # 파란색으로 변경 (Red -> Blue)
+            customdata=hover_labels, 
+            hovertemplate="<b>%{x}</b><br>건전성 점수: %{y:.1f}점<br>%{customdata}<extra></extra>" # 위험점수 -> 건전성점수
+        ))
+        
+        # 2. 정상/산업 평균 (배경 비교군)
+        fig_bar.add_trace(go.Bar(x=categories, y=normal_scores, name='정상 평균', marker_color='green', opacity=0.3))
+        fig_bar.add_trace(go.Bar(x=categories, y=industry_scores, name='산업 평균', marker_color='orange', opacity=0.3)) 
+        
+        fig_bar.update_layout(
+            title="지표별 건전성 수준 (100점 만점)", 
+            barmode='group', 
+            height=500,
+            yaxis=dict(title="점수 (높을수록 우량)", range=[0, 100])
+        )
         st.plotly_chart(fig_bar, use_container_width=True)
 
+    # [오른쪽] 레이더 차트: 건전성 균형도
     with col_radar:
         def wrap(l): return l + [l[0]]
         fig_radar = go.Figure()
-        fig_radar.add_trace(go.Scatterpolar(r=wrap(normal_scores), theta=wrap(categories), fill='toself', name='정상 평균', line_color='green', opacity=0.3))
-        fig_radar.add_trace(go.Scatterpolar(r=wrap(industry_scores), theta=wrap(categories), name='산업 평균', line=dict(color='orange', dash='dash'))) # 레이더에 산업 평균 추가
-        fig_radar.add_trace(go.Scatterpolar(r=wrap(company_scores), theta=wrap(categories), name='분석 대상', line=dict(color='red', width=4), customdata=wrap(hover_labels), hovertemplate="<b>%{theta}</b><br>위험 점수: %{r}점<br>%{customdata}<extra></extra>"))
-        fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), title="다차원 리스크 균형도", height=500)
+        
+        # 1. 정상/산업 평균
+        fig_radar.add_trace(go.Scatterpolar(r=wrap(normal_scores), theta=wrap(categories), fill='toself', name='정상 평균', line_color='green', opacity=0.1))
+        fig_radar.add_trace(go.Scatterpolar(r=wrap(industry_scores), theta=wrap(categories), name='산업 평균', line=dict(color='orange', dash='dash')))
+        
+        # 2. 내 기업 (파란색 실선)
+        fig_radar.add_trace(go.Scatterpolar(
+            r=wrap(company_scores), 
+            theta=wrap(categories), 
+            name='분석 대상', 
+            line=dict(color='#2962ff', width=3), # 파란색으로 변경
+            fill='toself',      # 영역 채우기 추가 (안전 영역이 넓어 보이게)
+            opacity=0.2,        # 투명도
+            customdata=wrap(hover_labels), 
+            hovertemplate="<b>%{theta}</b><br>건전성 점수: %{r:.1f}점<br>%{customdata}<extra></extra>"
+        ))
+        
+        fig_radar.update_layout(
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, 100], ticksuffix="점"),
+                bgcolor='rgba(0,0,0,0)'
+            ), 
+            title="다차원 건전성 균형도 (넓을수록 안전)", 
+            height=500
+        )
         st.plotly_chart(fig_radar, use_container_width=True)
 
     # 4. SHAP 전체 출력 (기여도 그래프)

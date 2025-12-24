@@ -106,18 +106,9 @@ def load_data_and_model(ticker):
         return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 
     try:
-        # 컬럼 변경 없이 바로 읽어옵니다. (시트 헤더가 영어여야 함)
         df_company = pd.read_csv(get_csv_url(SHEET_ID, GID_SHEET1))
         df_ind_avg = pd.read_csv(get_csv_url(SHEET_ID, GID_SHEET2))
         df_stat_avg = pd.read_csv(get_csv_url(SHEET_ID, GID_SHEET3))
-        
-        # '티커'나 '종목코드'가 혹시 남아있을 경우를 대비해 'stock_code'로 통일 (안전장치)
-        # 시트에 이미 'stock_code'로 되어있다면 이 부분은 무시됩니다.
-        if '종목코드' in df_company.columns:
-            df_company.rename(columns={'종목코드': 'stock_code'}, inplace=True)
-        if '티커' in df_company.columns:
-            df_company.rename(columns={'티커': 'stock_code'}, inplace=True)
-
     except Exception as e:
         st.error(f"구글 시트 로드 중 에러 발생: {e}")
         return None
@@ -168,19 +159,64 @@ def load_data_and_model(ticker):
     # SHAP 값 계산
     explainer = shap.TreeExplainer(model)
     shap_vals = explainer.shap_values(X_input)[0]
+    
+    LOWER_IS_BETTER = [
+        # 1. 재무 비율 (부채는 적을수록 좋음)
+        "F1_Debt_Ratio", 
+        
+        # 2. 재무 변화량 (부채비율이 늘어나는 건 나쁨)
+        "F1_Debt_Ratio_change", 
+        "F1_Debt_Ratio_pct_change",
+
+        # 3. 리스크 모델 (M-Score는 높으면 회계부정 의심 -> 낮아야 좋음)
+        "F4_M_Score", 
+        
+        # 4. 거시경제 (금리/물가/환율은 오르면 기업 부담 -> 낮아야 좋음)
+        "M_Short_Term_Rate", 
+        "M_Long_Term_Rate",   # [추가됨] 설명: "상승하면... 불리"
+        "M_Inflation",        # 설명: "급등하면 비용 압박"
+        "M_Exchange_Rate",    # 설명: "위험 신호로 작용"
+
+        # 5. AI 부도 확률 예측 (당연히 확률이 낮아야 안전)
+        "audit_prob", 
+        "etc_prob", 
+        "mda_prob",
+        
+        # 6. 텍스트 감성 분석 (부정적 단어/불확실성은 적을수록 좋음)
+        "lex_neg_cnt",       # 부정 문장 수
+        "lex_neg_tf",        # 부정 단어 빈도
+        "lex_abs_mean"       # [추가됨] 설명: "높을수록... 불확실성 증가"
+    ]
 
     # 동적 스코어링 함수 (0~100점)
     def calculate_score(val, col_name):
         try:
+            # 전체 기업 데이터에서 최소/최대값 구하기
             min_v = df_company[col_name].min()
             max_v = df_company[col_name].max()
-            if max_v == min_v: return 50
-            score = (float(val) - min_v) / (max_v - min_v) * 100
-            return np.clip(score, 0, 100)
+            
+            # 분모가 0인 경우 (모든 기업의 값이 똑같을 때)
+            if max_v == min_v: return 50 
+            
+            val = float(val)
+            
+            if col_name in LOWER_IS_BETTER:
+                # [Case A] 낮을수록 좋은 지표 (역방향 스케일링)
+                # (최대값 - 내값) / (최대 - 최소) * 100
+                # 내 값이 최소값(Best)이면 100점, 최대값(Worst)이면 0점
+                score = (max_v - val) / (max_v - min_v) * 100
+            else:
+                # [Case B] 높을수록 좋은 지표 (정방향 스케일링) - 기본값
+                # (내값 - 최소) / (최대 - 최소) * 100
+                # 내 값이 최대값(Best)이면 100점, 최소값(Worst)이면 0점
+                score = (val - min_v) / (max_v - min_v) * 100
+                
+            return np.clip(score, 0, 100) # 0~100 사이로 안전하게 자름
         except:
             return 0
 
     shap_data = []
+    
     for i, name in enumerate(FEATURE_NAMES):
         # 카테고리 자동 분류
         if name.startswith("F1"): category = "financial"
@@ -231,35 +267,76 @@ def determine_traffic_lights_by_group(shap_data):
     return {"financial": get_color(score_fin), "text": get_color(score_text), "macro": get_color(score_macro)}
 
 def get_gemini_rag_analysis(data_summary, shap_data):
-    # [복구] 기존에 작성하신 상세 프롬프트 원문 유지
-    if not GEMINI_API_KEY: return "⚠️ API 키 필요"
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-flash-latest')
-    
-    top_factors_text = ""
-    for item in shap_data[:5]:
-        top_factors_text += f"- {item['name']}: {item['val']} (참고: {item['desc']})\n"
+    # 1. API 키 확인
+    if not GEMINI_API_KEY: 
+        return "⚠️ API 키가 설정되지 않았습니다."
 
-    prompt = f"""
-    당신은 기업 구조조정 및 부도 예측 전문가입니다. 
-    금융 지표와 텍스트(공시서류 내 텍스트) 분석 결과를 종합하여 통찰력 있는 보고서를 작성하세요.
+    # 2. 기본 정보 추출
+    ticker = data_summary.get('ticker', 'Unknown')
+    risk_score = data_summary.get('risk_score', 0)
+    company_name = data_summary.get('company_name', ticker)
+    
+    # =====================================================================
+    # [핵심 수정] 절대값 기준 Top 5가 아니라, '위험'과 '안전'을 각각 추출
+    # =====================================================================
+    
+    # 1. 위험 요인 (SHAP > 0): 부도 확률을 높이는 요소
+    # 값이 큰 순서대로 정렬 (가장 위험한 것부터)
+    risks = sorted([x for x in shap_data if x['shap'] > 0], key=lambda x: x['shap'], reverse=True)
+    top_risks = risks[:5] # 상위 5개 추출
 
-    [대상 기업 정보]
-    - 기업코드: {data_summary['ticker']}
-    - AI 종합 부도 위험도: {data_summary['risk_score']}%
-    
-    [가장 치명적인 위험 요인 Top 5 (순서대로 중요함)]
-    {top_factors_text}
-    
-    [작성 가이드]
-    1. 단순히 지표를 나열하지 말고, 지표 간의 인과관계를 설명하세요.
-    (예: "단기금리(M_Short_Term_Rate)가 상승하는 가운데 이자보상배율이 낮아져 금융 비용 부담이 심각합니다.")
-    2. 텍스트 지표(lex_*, *_prob)가 있다면, "정량적 수치뿐만 아니라 경영진의 언어적 뉘앙스에서도 불안감이 감지됨"처럼 해석하세요.
-    3. 마지막에는 반드시 "본 보고서는 투자 결정에 참고 자료로만 사용되어야 하며, 최종 투자 결정은 투자자 본인의 책임하에 신중히 내려야 합니다."
-    라는 경고 문구를 작성하세요.
-    """
+    # 2. 안전 요인 (SHAP < 0): 부도 확률을 낮추는(방어하는) 요소
+    # 절대값이 큰 순서대로 정렬 (가장 안전하게 만드는 것부터)
+    safes = sorted([x for x in shap_data if x['shap'] < 0], key=lambda x: abs(x['shap']), reverse=True)
+    top_safes = safes[:5] # 상위 5개 추출
+
+    # 3. 텍스트로 변환
+    risk_text = ""
+    if top_risks:
+        for item in top_risks:
+            risk_text += f"- {item['name']} ({item['desc']}): SHAP={item['shap']:.4f} [🚨위험요인], 실제값={item['val']}\n"
+    else:
+        risk_text = "(특이할 만한 위험 요인이 발견되지 않음 - 재무적으로 매우 안정적임)"
+
+    safe_text = ""
+    if top_safes:
+        for item in top_safes:
+            safe_text += f"- {item['name']} ({item['desc']}): SHAP={item['shap']:.4f} [✅안전요인], 실제값={item['val']}\n"
+    else:
+        safe_text = "(뚜렷한 방어 기제가 부족함)"
+
+    # 4. Gemini 프롬프트 구성
     try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel('gemini-flash-latest')
+        
+        prompt = f"""
+        당신은 기업 구조조정 및 부도 예측 전문가 AI입니다. 
+        사용자가 제공한 데이터를 바탕으로 투자자를 위한 정밀 분석 보고서를 작성하세요.
+
+        [분석 대상 기업]
+        - 기업명: {company_name} ({ticker})
+        - AI 종합 부도 위험 점수: {risk_score}점 (0점: 매우 안전 ~ 100점: 부도 위험 심각)
+
+        [데이터 분석 결과]
+        
+        1. 🚨 주요 위험 요인 (Risk Factors) - 부도 가능성을 높이는 요인들:
+        {risk_text}
+        
+        2. ✅ 주요 안전 요인 (Strength Factors) - 부도 가능성을 낮추는 방어 기제:
+        {safe_text}
+
+        [작성 가이드]
+        1. **종합 의견**: 위험 점수와 위 요인들을 종합하여 이 기업의 현재 상황을 2~3문장으로 요약하세요.
+        2. **위험 요인 분석**: 위 '주요 위험 요인' 목록에 있는 항목들이 왜 위험한지, 이것이 기업에 어떤 악영향을 줄 수 있는지 구체적으로 설명하세요. (목록이 없다면 안전하다고 칭찬하세요.)
+        3. **긍정 요인 분석**: 위 '주요 안전 요인' 목록을 바탕으로 이 기업의 재무적 강점이 무엇인지 설명하세요.
+        4. **제언**: 투자 관점에서 유의해야 할 점이나 모니터링해야 할 지표를 제시하세요.
+
+        (주의: SHAP 값이 양수(+)면 위험, 음수(-)면 안전입니다. 이 규칙을 절대 혼동하지 마세요.)
+        """
+
         response = model.generate_content(prompt)
         return response.text
-    except:
-        return "분석 생성 실패"
+
+    except Exception as e:
+        return f"분석 생성 실패: {str(e)}"
