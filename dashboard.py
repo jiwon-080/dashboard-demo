@@ -286,18 +286,61 @@ def load_data_and_model(ticker):
         "shap_data": shap_data
     }
     
-    
+
 def determine_traffic_lights_by_group(shap_data):
-    score_fin = np.mean([f['shap'] for f in shap_data if f['category'] == 'financial'])
-    score_text = np.mean([f['shap'] for f in shap_data if f['category'] == 'text'])
-    score_macro = np.mean([f['shap'] for f in shap_data if f['category'] == 'macro'])
-    
-    def get_color(score):
-        if score > 0.05: return "red"
-        elif score > 0.01: return "yellow"
+    # 5개 그룹별 SHAP 값 수집
+    vals_f1 = []      # 1. 재무비율
+    vals_macro = []   # 2. 시장지표(거시경제)
+    vals_model = []   # 3. 재무+시장 (부도거리 F2, 알트만 F3)
+    vals_fraud = []   # 4. 부정징후 (배니쉬 F4)
+    vals_text = []    # 5. 텍스트 분석
+
+    for item in shap_data:
+        name = item['name']
+        val = item['shap']
+        
+        # 이름 기반 분류
+        if name.startswith('F1'):
+            vals_f1.append(val)
+        elif name.startswith('M_'):
+            vals_macro.append(val)
+        elif name.startswith('F2') or name.startswith('F3'):
+            vals_model.append(val)
+        elif name.startswith('F4'):
+            vals_fraud.append(val)
+        elif 'prob' in name or 'lex' in name:
+            vals_text.append(val)
+        else:
+            # 혹시 분류 안 된 항목이 있다면 텍스트나 기타로 처리 (안전장치)
+            vals_text.append(val)
+
+    # 위험도 합계 계산 (np.nansum 활용)
+    def calculate_risk_impact(values):
+        if not values: return 0.0
+        return np.nansum(values)
+
+    score_f1 = calculate_risk_impact(vals_f1)
+    score_macro = calculate_risk_impact(vals_macro)
+    score_model = calculate_risk_impact(vals_model)
+    score_fraud = calculate_risk_impact(vals_fraud)
+    score_text = calculate_risk_impact(vals_text)
+
+    # 신호등 색상 기준 (합계 기준)
+    # F4(부정징후)는 지표가 1개뿐이므로 기준을 조금 예민하게 잡는 것도 방법입니다.
+    def get_color(score, is_single_feature=False):
+        # 단일 지표(F4)인 경우 기준을 조금 낮출 수도 있으나, 
+        # 일단 통일성을 위해 동일 기준(0.10 / 0.02) 적용 추천
+        if score > 0.10: return "red"       # 위험 기여도 +10% 이상
+        elif score > 0.02: return "yellow"  # 위험 기여도 +2% 이상
         else: return "green"
 
-    return {"financial": get_color(score_fin), "text": get_color(score_text), "macro": get_color(score_macro)}
+    return {
+        "f1": get_color(score_f1),          # 재무비율
+        "macro": get_color(score_macro),    # 시장지표
+        "model": get_color(score_model),    # 부도거리/Z-score
+        "fraud": get_color(score_fraud),    # 배니쉬 M-score
+        "text": get_color(score_text)       # 텍스트
+    }
 
 def get_gemini_rag_analysis(data_summary, shap_data):
     # 1. API 키 확인

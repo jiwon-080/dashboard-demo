@@ -61,20 +61,44 @@ if st.session_state.get('run'):
     
     st.divider()
     
-    # 신호등 섹션
-    st.subheader("🚦 리스크 팩터 상태판")
-    c1, c2, c3 = st.columns(3)
+    st.subheader("🚦 5대 핵심 리스크 감지")
+    
+    # 5개 컬럼 생성
+    c1, c2, c3, c4, c5 = st.columns(5)
+    
     ind = data['indicators']
     
-    def draw_light(col, name, status, icon_char):
+    # 신호등 그리는 함수 (디자인 유지)
+    def draw_light(col, title, subtitle, status, icon):
         colors = {"red": "#FFEBEE", "yellow": "#FFFDE7", "green": "#E8F5E9"}
         emoji = {"red": "🔴 위험", "yellow": "🟡 주의", "green": "🟢 양호"}
-        with col: 
-            st.markdown(f"<div class='metric-box' style='background-color: {colors[status]};'><h3>{icon_char}</h3><b>{name}</b><p>{emoji[status]}</p></div>", unsafe_allow_html=True)
-            
-    draw_light(c1, "재무/시장 복합", ind['financial'], "💰")
-    draw_light(c2, "AI 텍스트 분석", ind['text'], "📝")
-    draw_light(c3, "거시경제 환경", ind['macro'], "🌍")
+        status = status if status else "green"
+        
+        with col:
+            st.markdown(f"""
+                <div class='metric-box' style='background-color: {colors.get(status, "#fff")}; padding: 10px;'>
+                    <div style='font-size:24px; margin-bottom:4px;'>{icon}</div>
+                    <div style='font-size:14px; font-weight:bold; color:#333;'>{title}</div>
+                    <div style='font-size:11px; color:#666; margin-bottom:8px;'>{subtitle}</div>
+                    <div style='font-size:13px;'>{emoji.get(status, "🟢 양호")}</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+    # 5개 항목 배치
+    # 1. 재무비율 (F1)
+    draw_light(c1, "재무 건전성", "기초 재무비율(F1)", ind.get('f1'), "💰")
+    
+    # 2. 시장지표 (Macro)
+    draw_light(c2, "시장 환경", "거시경제 지표(M)", ind.get('macro'), "🌍")
+    
+    # 3. 부도 위험 (F2, F3)
+    draw_light(c3, "부도 예측", "KMV & Altman Z-score", ind.get('model'), "📉")
+    
+    # 4. 부정 징후 (F4)
+    draw_light(c4, "회계 부정 징후", "Beneish M-score", ind.get('fraud'), "🕵️")
+    
+    # 5. 텍스트 분석
+    draw_light(c5, "텍스트 분석", "공시 보고서 내 텍스트 분석", ind.get('text'), "📝")
 
     # --------------------------------------------------------------------------------
     # 4. 7대 핵심 건전성 분석 (수정된 로직 적용)
