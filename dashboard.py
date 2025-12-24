@@ -156,10 +156,9 @@ def load_data_and_model(ticker):
     
     prob = model.predict_proba(X_input)[0][1]
     
-    # SHAP 값 계산
     explainer = shap.TreeExplainer(model)
     shap_vals = explainer.shap_values(X_input)[0]
-    
+
     LOWER_IS_BETTER = [
         # 1. 재무 비율 (부채는 적을수록 좋음)
         "F1_Debt_Ratio", 
@@ -255,9 +254,9 @@ def load_data_and_model(ticker):
     
     
 def determine_traffic_lights_by_group(shap_data):
-    score_fin = sum(f['shap'] for f in shap_data if f['category'] == 'financial')
-    score_text = sum(f['shap'] for f in shap_data if f['category'] == 'text')
-    score_macro = sum(f['shap'] for f in shap_data if f['category'] == 'macro')
+    score_fin = np.mean([f['shap'] for f in shap_data if f['category'] == 'financial'])
+    score_text = np.mean([f['shap'] for f in shap_data if f['category'] == 'text'])
+    score_macro = np.mean([f['shap'] for f in shap_data if f['category'] == 'macro'])
     
     def get_color(score):
         if score > 0.05: return "red"
