@@ -116,8 +116,6 @@ def load_data_and_model(ticker):
     # 3. 49개 피처 누락 방지 (0으로 채우기)
     for col in FEATURE_NAMES:
         if col not in df_company.columns: df_company[col] = 0.0
-        if col not in df_ind_avg.columns: df_ind_avg[col] = 0.0
-        if col not in df_stat_avg.columns: df_stat_avg[col] = 0.0
 
     # 4. 데이터 필터링 (6자리 코드로 변환하여 비교)
     # 문자열로 변환하고, 6자리를 맞춥니다 (예: 5930 -> 005930)
@@ -128,13 +126,45 @@ def load_data_and_model(ticker):
     
     company_row = company_row.iloc[0]
     
-    # 1. 산업군 평균 (ind_row) 가져오기
+    # 1. 내 기업의 산업군(섹터) 이름 가져오기
+    # 컬럼명이 '섹터'일 수도 있고 '산업군'일 수도 있어서 둘 다 확인
+    if '섹터' in company_row:
+        my_sector = str(company_row['섹터']).strip()
+    elif '산업군' in company_row:
+        my_sector = str(company_row['산업군']).strip()
+    else:
+        my_sector = "Unknown"
+
+    # 2. 산업군 평균 (ind_row) 찾기
     try:
-        # 우선 Sheet2(산업군 평균)에서 내 산업군을 찾습니다.
-        ind_row = df_ind_avg[df_ind_avg['섹터'] == company_row['섹터']].iloc[0]
-    except:
-        # [Fallback] 산업군 데이터가 없으면, Sheet3의 'Target 0(정상)' 통계를 씁니다.
-        # 기존 코드의 '구분' == '정상기업' 로직을 아래와 같이 수정:
+        # Sheet2(산업평균)의 '섹터' 컬럼도 공백 제거하여 비교 준비
+        # (만약 Sheet2의 컬럼명이 '산업군'이라면 아래 '섹터'를 '산업군'으로 바꿔주세요)
+        if '섹터' in df_ind_avg.columns:
+            target_col = '섹터'
+        elif '산업군' in df_ind_avg.columns:
+            target_col = '산업군'
+        else:
+            raise ValueError("Sheet2에 '섹터' 또는 '산업군' 컬럼이 없습니다.")
+
+        # 비교를 위해 문자열 변환 및 공백 제거
+        df_ind_avg[target_col] = df_ind_avg[target_col].astype(str).str.strip()
+        
+        # 매칭 시도
+        matched_rows = df_ind_avg[df_ind_avg[target_col] == my_sector]
+        
+        if not matched_rows.empty:
+            # 매칭 성공! 해당 산업군 평균 사용
+            ind_row = matched_rows.iloc[0]
+            # (디버깅용: 필요시 주석 해제)
+            print(f"✅ 산업군 매칭 성공: {my_sector}")
+        else:
+            # 매칭 실패 -> 전체 정상기업 평균 사용 (Fallback)
+            print(f"⚠️ 산업군 매칭 실패: '{my_sector}' (Sheet2 목록에 없음)")
+            ind_row = df_stat_avg[df_stat_avg['Target'] == 0].iloc[0]
+
+    except Exception as e:
+        # 에러 발생 시 -> 전체 정상기업 평균 사용
+        # print(f"❌ 산업군 로직 에러: {e}")
         ind_row = df_stat_avg[df_stat_avg['Target'] == 0].iloc[0]
 
     # 2. 정상기업 평균 (norm_row) 가져오기
@@ -187,32 +217,36 @@ def load_data_and_model(ticker):
         "lex_abs_mean"       # [추가됨] 설명: "높을수록... 불확실성 증가"
     ]
 
-    # 동적 스코어링 함수 (0~100점)
+    # [수정] 이상치(Outlier)에 강한 '백분위(Rank) 기반' 스코어링 함수
     def calculate_score(val, col_name):
         try:
-            # 전체 기업 데이터에서 최소/최대값 구하기
-            min_v = df_company[col_name].min()
-            max_v = df_company[col_name].max()
-            
-            # 분모가 0인 경우 (모든 기업의 값이 똑같을 때)
-            if max_v == min_v: return 50 
-            
+            # 1. 결측치 방어
             val = float(val)
+            if pd.isna(val): return 50
+
+            # 2. 해당 컬럼의 유효한 데이터 전체 가져오기 (NaN 제외)
+            all_values = pd.to_numeric(df_company[col_name], errors='coerce').dropna()
             
+            if all_values.empty: return 50
+            
+            # 3. 내 값이 전체에서 상위 몇 %인지 계산 (0.0 ~ 1.0)
+            # (scipy 없이 순수 pandas/numpy로 구현)
+            # 내 값보다 작은 데이터의 비율을 구함
+            percentile = (all_values < val).mean()
+            
+            # 4. 점수 변환 (0~100점)
+            score = percentile * 100
+            
+            # 5. 낮을수록 좋은 지표(LOWER_IS_BETTER)는 점수 뒤집기
+            # (예: 부채비율은 상위 90%(=값이 큼)일수록 나쁜 거니까 100 - 90 = 10점)
             if col_name in LOWER_IS_BETTER:
-                # [Case A] 낮을수록 좋은 지표 (역방향 스케일링)
-                # (최대값 - 내값) / (최대 - 최소) * 100
-                # 내 값이 최소값(Best)이면 100점, 최대값(Worst)이면 0점
-                score = (max_v - val) / (max_v - min_v) * 100
-            else:
-                # [Case B] 높을수록 좋은 지표 (정방향 스케일링) - 기본값
-                # (내값 - 최소) / (최대 - 최소) * 100
-                # 내 값이 최대값(Best)이면 100점, 최소값(Worst)이면 0점
-                score = (val - min_v) / (max_v - min_v) * 100
+                score = 100 - score
                 
-            return np.clip(score, 0, 100) # 0~100 사이로 안전하게 자름
-        except:
-            return 0
+            return np.clip(score, 0, 100)
+            
+        except Exception as e:
+            # print(f"Score Error {col_name}: {e}") # 디버깅용
+            return 50
 
     shap_data = []
     
