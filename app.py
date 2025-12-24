@@ -22,14 +22,17 @@ st.markdown("""
 
 # 사이드바
 st.sidebar.title("🛠️ 모델 설정")
-ticker = st.sidebar.text_input("종목 코드", value="005930")
+ticker = st.sidebar.text_input("종목 코드")
 if st.sidebar.button("AI 진단 시작"):
     st.session_state['run'] = True
 
 if st.session_state.get('run'):
     with st.spinner("데이터 분석 중..."):
         data = db.load_data_and_model(ticker)
-    
+        if data is None:
+            st.error("⚠️ 해당 종목 코드를 찾을 수 없습니다. 다시 확인해주세요.")
+            st.stop()
+
     st.title(f"📊 {ticker} 통합 부도 리스크 분석")
     col_h1, col_h2 = st.columns([1, 2])
     with col_h1: st.metric("현재 주가", f"{data['price']:,.0f}원")
