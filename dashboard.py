@@ -330,7 +330,7 @@ def determine_traffic_lights_by_group(shap_data):
         "macro": {"red": 0.08, "yellow": 0.03},
         
         # 3. 부도모델 (가장 결정적이나 수치가 크게 튀므로 높게 설정)
-        "model": {"red": 5.00, "yellow": 2.50},
+        "model": {"red": 3.00, "yellow": 2.00},
         
         # 4. 부정징후 (M-score는 0.2 정도면 꽤 높은 편)
         "fraud": {"red": 0.20, "yellow": 0.10},
